@@ -3,7 +3,8 @@ import { send } from './websocket.js';
 export const bins = {};
 export const markers = {};
 
-export const map = L.map('map').setView([12.9716, 79.1636], 16);
+// VIT Vellore Campus Center Coordinates
+export const map = L.map('map').setView([12.9716, 79.1577], 16);
 L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', { maxZoom: 19 }).addTo(map);
 
 const greenIcon = L.divIcon({ className: 'marker-green' });

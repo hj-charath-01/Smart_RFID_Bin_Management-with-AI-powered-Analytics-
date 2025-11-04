@@ -133,7 +133,7 @@ def seconds_to_fill_for_score(score: int) -> float:
     return FASTEST_FILL_SECONDS + frac * span
 
 # ------------------------------
-# Simulation loop
+# Simulation loop - FIXED
 # ------------------------------
 async def simulation_loop():
     global SIMULATED_TIME, SIM_SPEED
@@ -143,27 +143,52 @@ async def simulation_loop():
 
         for b in list(BINS.values()):
             score = int(b.get("population_score", 0) or 0)
-            if score > 0 and not b.get("paused", False):
+            
+            # FIXED: Check if bin is paused (full) - if so, skip updates
+            if b.get("paused", False):
+                continue
+                
+            if score > 0:
                 secs_to_fill = seconds_to_fill_for_score(score)
                 if math.isfinite(secs_to_fill) and secs_to_fill > 0:
                     pct_per_second = 100.0 / secs_to_fill
                     delta = pct_per_second * effective_seconds
                     new_fill = min(100.0, round(b.get("fill_pct", 0.0) + delta, 4))
+                    
                     if new_fill != b.get("fill_pct", 0.0):
                         b["fill_pct"] = new_fill
-                        updates.append({
-                            "type": "fill_update",
-                            "bin_id": b["id"],
-                            "fill_pct": b["fill_pct"],
-                            "rfid": b["rfid"],
-                            "collections": b["collections"]
-                        })
+                        
+                        # FIXED: When bin reaches 100%, pause it and broadcast separately
                         if b["fill_pct"] >= 100.0:
                             b["fill_pct"] = 100.0
                             b["paused"] = True
-                            updates.append({"type": "bin_full", "bin_id": b["id"]})
+                            
+                            # Broadcast fill update first
+                            updates.append({
+                                "type": "fill_update",
+                                "bin_id": b["id"],
+                                "fill_pct": b["fill_pct"],
+                                "rfid": b["rfid"],
+                                "collections": b["collections"]
+                            })
+                            
+                            # Then broadcast full status
+                            updates.append({
+                                "type": "bin_full", 
+                                "bin_id": b["id"]
+                            })
+                            
                             log_bin_state(b, event="full")
+                            print(f"🔴 Bin {b['id']} reached 100% - PAUSED")
                         else:
+                            # Normal fill update
+                            updates.append({
+                                "type": "fill_update",
+                                "bin_id": b["id"],
+                                "fill_pct": b["fill_pct"],
+                                "rfid": b["rfid"],
+                                "collections": b["collections"]
+                            })
                             log_bin_state(b, event="auto_update")
 
         SIMULATED_TIME += timedelta(seconds=effective_seconds)
@@ -333,7 +358,7 @@ async def suggest_new_bin():
             "success": True,
             "suggestion": {
                 "lat": 12.9716,
-                "lng": 79.1588,
+                "lng": 79.1577,  # VIT Vellore campus center
                 "expected_population_score": 5,
                 "reason": "first_bin_center"
             }
@@ -419,7 +444,7 @@ async def optimize_route(threshold: float = 80.0):
             "message": "No bins above threshold"
         }
     
-    depot = (12.9716, 79.1588)
+    depot = (12.9716, 79.1577)  # VIT Vellore campus center
     route = optimizer.optimize_collection_route(bins_to_collect, depot)
     
     total_distance = 0
@@ -539,7 +564,8 @@ async def analytics_optimize(num_new_bins: int = 3):
             "estimated_population_score": suggestion['expected_score'],
             "coverage_score": min(10, int(suggestion.get('optimization_score', 0) / 10)),
             "distance_to_nearest_bin_km": round(min_dist, 2) if min_dist != float('inf') else 0,
-            "reason": suggestion['reason']
+            "reason": suggestion['reason'],
+            "demand_level": round(suggestion.get('demand_level', 0), 3)
         })
         
         temp_bins.append({
@@ -622,7 +648,7 @@ async def analytics_summary():
     }
 
 # ------------------------------
-# WebSocket handler
+# WebSocket handler - FIXED
 # ------------------------------
 @app.websocket("/ws")
 async def websocket_endpoint(websocket: WebSocket):
@@ -675,10 +701,15 @@ async def websocket_endpoint(websocket: WebSocket):
                 if not b:
                     await websocket.send_text(json.dumps({"type": "error", "message": "bin_not_found"}))
                     continue
+                
+                # FIXED: Properly reset bin after collection
                 b["fill_pct"] = 0.0
                 b["collections"] += 1
-                b["paused"] = False
+                b["paused"] = False  # Unpause the bin
+                
                 log_bin_state(b, event="collected")
+                print(f"✅ Collected bin {bin_id} - Collections: {b['collections']}")
+                
                 await manager.broadcast({
                     "type": "collected",
                     "bin_id": bin_id,
@@ -688,15 +719,21 @@ async def websocket_endpoint(websocket: WebSocket):
                     "type": "fill_update",
                     "bin_id": bin_id,
                     "fill_pct": b["fill_pct"],
-                    "rfid": b["rfid"]
+                    "rfid": b["rfid"],
+                    "collections": b["collections"]
                 })
 
             elif mtype == "remove_bin":
                 bin_id = msg.get("bin_id")
                 if bin_id in BINS:
+                    print(f"🗑️ Removing bin: {bin_id}")
                     log_bin_state(BINS[bin_id], event="removed")
                     del BINS[bin_id]
                     await manager.broadcast({"type": "bin_removed", "bin_id": bin_id})
+                    print(f"✅ Bin {bin_id} removed successfully")
+                else:
+                    print(f"⚠️ Attempted to remove non-existent bin: {bin_id}")
+                    await websocket.send_text(json.dumps({"type": "error", "message": "bin_not_found"}))
 
             elif mtype == "set_speed":
                 try:

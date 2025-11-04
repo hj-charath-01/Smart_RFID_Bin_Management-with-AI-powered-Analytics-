@@ -27,7 +27,7 @@ class BinPredictor:
         ]
     
     def extract_features(self, bin_data: dict, historical_data: List[dict],
-                        campus_center: Tuple[float, float] = (12.9716, 79.1588)) -> np.ndarray:
+                        campus_center: Tuple[float, float] = (12.9716, 79.1577)) -> np.ndarray:
         """Extract features for prediction from bin data."""
         
         # Basic features
@@ -250,71 +250,164 @@ class BinPositionOptimizer:
         Args:
             campus_bounds: dict with 'min_lat', 'max_lat', 'min_lng', 'max_lng'
         """
+        # VIT Vellore Campus Coordinates
         self.bounds = campus_bounds or {
             'min_lat': 12.9650,
             'max_lat': 12.9780,
             'min_lng': 79.1520,
             'max_lng': 79.1640
         }
+        # VIT Vellore campus center
+        self.campus_center = (12.9716, 79.1577)
+    
+    def calculate_bin_fill_rates(self, existing_bins: List[dict]) -> Dict[str, float]:
+        """
+        Calculate actual fill rates for existing bins based on their population score and current fill.
+        Returns a dict mapping bin_id to fill_rate (percent per hour).
+        """
+        fill_rates = {}
+        for bin_data in existing_bins:
+            pop_score = bin_data.get('population_score', 0)
+            if pop_score > 0:
+                # Calculate fill rate based on population score
+                # Higher score = faster fill rate
+                FASTEST_HOURS = 6
+                SLOWEST_HOURS = 48
+                
+                score = max(1, min(10, pop_score))
+                hours_to_fill = FASTEST_HOURS + ((10 - score) / 9.0) * (SLOWEST_HOURS - FASTEST_HOURS)
+                fill_rate = 100.0 / hours_to_fill  # percent per hour
+                
+                fill_rates[bin_data['id']] = fill_rate
+            else:
+                fill_rates[bin_data['id']] = 0.0
+        
+        return fill_rates
+    
+    def create_demand_heatmap(self, existing_bins: List[dict], 
+                             grid_size: int = 50) -> np.ndarray:
+        """
+        Create a demand heatmap based on existing bin fill rates.
+        High-traffic areas (fast-filling bins) get higher values.
+        """
+        heatmap = np.zeros((grid_size, grid_size))
+        
+        if not existing_bins:
+            return heatmap
+        
+        # Calculate fill rates for all bins
+        fill_rates = self.calculate_bin_fill_rates(existing_bins)
+        
+        # Create grid
+        lat_range = np.linspace(self.bounds['min_lat'], self.bounds['max_lat'], grid_size)
+        lng_range = np.linspace(self.bounds['min_lng'], self.bounds['max_lng'], grid_size)
+        
+        # For each grid cell, calculate demand based on nearby bins
+        for i, lat in enumerate(lat_range):
+            for j, lng in enumerate(lng_range):
+                demand = 0.0
+                
+                for bin_data in existing_bins:
+                    bin_lat = bin_data.get('lat')
+                    bin_lng = bin_data.get('lng')
+                    bin_id = bin_data.get('id')
+                    
+                    if bin_lat and bin_lng and bin_id in fill_rates:
+                        # Distance from this grid cell to the bin
+                        dist = self._haversine_distance(lat, lng, bin_lat, bin_lng)
+                        
+                        # Bins with higher fill rates contribute more to demand
+                        # Use gaussian-like falloff with distance
+                        fill_rate = fill_rates[bin_id]
+                        if dist < 0.3:  # Within 300m
+                            # Normalize fill rate (0-10 scale, higher = more demand)
+                            normalized_rate = fill_rate / 10.0  # Rough normalization
+                            influence = normalized_rate * np.exp(-(dist ** 2) / 0.05)
+                            demand += influence
+                
+                heatmap[i, j] = demand
+        
+        # Normalize heatmap to 0-1 range
+        if heatmap.max() > 0:
+            heatmap = heatmap / heatmap.max()
+        
+        return heatmap
     
     def suggest_new_position(self, existing_bins: List[dict],
                             population_heatmap: Optional[np.ndarray] = None,
                             grid_size: int = 50) -> Dict[str, float]:
         """
-        Suggest optimal position for a new bin.
+        Suggest optimal position for a new bin based on existing bin fill rates.
         
         Args:
             existing_bins: List of current bin dictionaries
-            population_heatmap: 2D array of population density (optional)
+            population_heatmap: 2D array of population density (optional, overridden by actual data)
             grid_size: Resolution of search grid
         """
         if not existing_bins:
             # First bin - place at campus center
             return {
-                'lat': (self.bounds['min_lat'] + self.bounds['max_lat']) / 2,
-                'lng': (self.bounds['min_lng'] + self.bounds['max_lng']) / 2,
+                'lat': self.campus_center[0],
+                'lng': self.campus_center[1],
                 'reason': 'first_bin_center',
                 'expected_score': 7
             }
+        
+        # Create demand heatmap based on actual bin performance
+        demand_heatmap = self.create_demand_heatmap(existing_bins, grid_size)
         
         # Extract existing positions
         existing_pos = np.array([
             [b['lat'], b['lng']] for b in existing_bins
         ])
         
-        # Create evaluation grid
+        # Create evaluation grid WITHIN campus bounds
         lats = np.linspace(self.bounds['min_lat'], self.bounds['max_lat'], grid_size)
         lngs = np.linspace(self.bounds['min_lng'], self.bounds['max_lng'], grid_size)
         
         best_score = -np.inf
         best_position = None
         
-        for lat in lats:
-            for lng in lngs:
+        for i, lat in enumerate(lats):
+            for j, lng in enumerate(lngs):
+                # Ensure position is within bounds
+                if not self._is_within_bounds(lat, lng):
+                    continue
+                    
                 score = self._evaluate_position(
-                    lat, lng, existing_pos, population_heatmap
+                    lat, lng, existing_pos, demand_heatmap, i, j
                 )
                 if score > best_score:
                     best_score = score
-                    best_position = (lat, lng)
+                    best_position = (lat, lng, i, j)
         
-        # Estimate population score for this position
-        expected_score = self._estimate_population_score(
-            best_position[0], best_position[1], population_heatmap
-        )
+        # Fallback to campus center if no valid position found
+        if best_position is None:
+            best_position = (*self.campus_center, grid_size//2, grid_size//2)
+        
+        # Estimate population score based on demand at this location
+        demand_value = demand_heatmap[best_position[2], best_position[3]]
+        expected_score = self._estimate_score_from_demand(demand_value)
         
         return {
             'lat': best_position[0],
             'lng': best_position[1],
-            'reason': 'optimized_coverage',
+            'reason': 'optimized_based_on_fill_rates',
             'optimization_score': best_score,
-            'expected_score': expected_score
+            'expected_score': expected_score,
+            'demand_level': float(demand_value)
         }
+    
+    def _is_within_bounds(self, lat: float, lng: float) -> bool:
+        """Check if coordinates are within campus bounds."""
+        return (self.bounds['min_lat'] <= lat <= self.bounds['max_lat'] and
+                self.bounds['min_lng'] <= lng <= self.bounds['max_lng'])
     
     def _evaluate_position(self, lat: float, lng: float,
                           existing_pos: np.ndarray,
-                          population_heatmap: Optional[np.ndarray]) -> float:
-        """Evaluate quality of a position."""
+                          demand_heatmap: np.ndarray,
+                          grid_i: int, grid_j: int) -> float:
+        """Evaluate quality of a position based on demand and coverage."""
         score = 0.0
         
         # 1. Coverage score (distance to nearest existing bin)
@@ -325,48 +418,48 @@ class BinPositionOptimizer:
             ]
             min_dist = min(distances)
             
-            # Ideal distance: 0.2-0.5 km
-            if min_dist < 0.1:
+            # Ideal distance: 0.15-0.4 km
+            if min_dist < 0.08:
                 score -= 100  # Too close
-            elif 0.2 <= min_dist <= 0.5:
-                score += 50  # Ideal spacing
+            elif 0.15 <= min_dist <= 0.4:
+                score += 40  # Good spacing
             else:
-                score += min(30, min_dist * 20)  # Prefer coverage gaps
+                score += min(25, min_dist * 20)  # Prefer coverage gaps
         
-        # 2. Population density score
-        if population_heatmap is not None:
-            # Map position to heatmap coordinates
-            lat_idx = int((lat - self.bounds['min_lat']) / 
-                         (self.bounds['max_lat'] - self.bounds['min_lat']) * 
-                         (population_heatmap.shape[0] - 1))
-            lng_idx = int((lng - self.bounds['min_lng']) / 
-                         (self.bounds['max_lng'] - self.bounds['min_lng']) * 
-                         (population_heatmap.shape[1] - 1))
-            
-            if 0 <= lat_idx < population_heatmap.shape[0] and \
-               0 <= lng_idx < population_heatmap.shape[1]:
-                score += population_heatmap[lat_idx, lng_idx] * 30
+        # 2. DEMAND SCORE - Most important factor (based on actual bin fill rates)
+        if 0 <= grid_i < demand_heatmap.shape[0] and 0 <= grid_j < demand_heatmap.shape[1]:
+            demand = demand_heatmap[grid_i, grid_j]
+            # High demand areas should get significantly higher scores
+            score += demand * 100  # Weight demand heavily
+        
+        # 3. Distance from campus center (prefer somewhat central locations)
+        dist_from_center = self._haversine_distance(
+            lat, lng, self.campus_center[0], self.campus_center[1]
+        )
+        # Slight penalty for being too far from center
+        if dist_from_center > 0.6:
+            score -= dist_from_center * 15
         
         return score
     
-    def _estimate_population_score(self, lat: float, lng: float,
-                                   population_heatmap: Optional[np.ndarray]) -> int:
-        """Estimate population score for a location."""
-        if population_heatmap is not None:
-            lat_idx = int((lat - self.bounds['min_lat']) / 
-                         (self.bounds['max_lat'] - self.bounds['min_lat']) * 
-                         (population_heatmap.shape[0] - 1))
-            lng_idx = int((lng - self.bounds['min_lng']) / 
-                         (self.bounds['max_lng'] - self.bounds['min_lng']) * 
-                         (population_heatmap.shape[1] - 1))
-            
-            if 0 <= lat_idx < population_heatmap.shape[0] and \
-               0 <= lng_idx < population_heatmap.shape[1]:
-                normalized = population_heatmap[lat_idx, lng_idx]
-                return max(1, min(10, int(normalized * 10)))
-        
-        # Default middle score
-        return 5
+    def _estimate_score_from_demand(self, demand_value: float) -> int:
+        """Estimate population score (1-10) from demand value (0-1)."""
+        # Map demand to population score
+        # Higher demand = higher population score
+        if demand_value >= 0.8:
+            return 9
+        elif demand_value >= 0.6:
+            return 8
+        elif demand_value >= 0.4:
+            return 7
+        elif demand_value >= 0.25:
+            return 6
+        elif demand_value >= 0.15:
+            return 5
+        elif demand_value >= 0.08:
+            return 4
+        else:
+            return 3
     
     def _haversine_distance(self, lat1: float, lon1: float,
                            lat2: float, lon2: float) -> float:
@@ -476,8 +569,8 @@ def create_prediction_api_endpoints(app, predictor: BinPredictor,
             if b.get('fill_pct', 0) >= threshold
         ]
         
-        # Use campus center as depot
-        depot = (12.9716, 79.1588)
+        # Use VIT Vellore campus center as depot
+        depot = (12.9716, 79.1577)
         route = optimizer.optimize_collection_route(bins_to_collect, depot)
         
         return {
@@ -488,7 +581,9 @@ def create_prediction_api_endpoints(app, predictor: BinPredictor,
 
 
 if __name__ == "__main__":
-    print(" Smart Bin Prediction & Optimization System")
+    print("🧠 Smart Bin Prediction & Optimization System")
+    print("🏫 Configured for VIT Vellore Campus")
+    print("📊 Optimized placement based on actual bin fill rates")
     print("=" * 50)
     
     # Initialize
@@ -497,9 +592,9 @@ if __name__ == "__main__":
     
     # Example bin data
     example_bins = [
-        {"id": "BIN-001", "lat": 12.9700, "lng": 79.1580, 
+        {"id": "BIN-001", "lat": 12.9700, "lng": 79.1560, 
          "population_score": 8, "fill_pct": 45, "collections": 5},
-        {"id": "BIN-002", "lat": 12.9730, "lng": 79.1600, 
+        {"id": "BIN-002", "lat": 12.9730, "lng": 79.1590, 
          "population_score": 6, "fill_pct": 70, "collections": 3}
     ]
     
@@ -509,6 +604,7 @@ if __name__ == "__main__":
     print(f"   Latitude: {suggestion['lat']:.6f}")
     print(f"   Longitude: {suggestion['lng']:.6f}")
     print(f"   Expected Score: {suggestion['expected_score']}")
+    print(f"   Demand Level: {suggestion.get('demand_level', 0):.3f}")
     print(f"   Reason: {suggestion['reason']}")
     
     print("\n✅ System ready for integration!")
