@@ -1,0 +1,53 @@
+<!doctype html>
+<html>
+<head>
+  <meta charset="utf-8" />
+  <title>VIT Smart Bin Simulator — Live Analytics</title>
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <link rel="stylesheet" href="https://unpkg.com/leaflet/dist/leaflet.css" />
+  <link rel="stylesheet" href="css/style.css" />
+</head>
+<body>
+  <h3>🗺️ VIT Smart Bin Simulator — population-score driven</h3>
+
+  <div class="controls">
+    <button id="startBtn" class="btn primary">Connect</button>
+    <button id="downloadCSV" class="btn">Download CSV</button>
+    <button id="resetSim" class="btn" style="background:#f0ad4e;color:#fff;">Reset</button>
+    
+    <div class="small" style="margin-left:8px">
+      Simulated time: <span id="simTime">--</span>
+      <span style="margin-left:8px">Speed: <span id="simSpeed">1×</span></span>
+    </div>
+    <div class="speed-controls" style="margin-left:auto">
+      <button class="btn" data-speed="1">1×</button>
+      <button class="btn" data-speed="10">10×</button>
+      <button class="btn" data-speed="60">60×</button>
+      <button class="btn" data-speed="3600">3600×</button>
+    </div>
+    <span id="status" style="margin-left:12px;color:#666">Disconnected</span>
+  </div>
+
+  <div id="map"></div>
+
+  <!-- Dashboard Section -->
+  <div id="dashboard">
+    <h3>📊 Live Analytics Dashboard</h3>
+
+    <div class="dash-container">
+      <div class="dash-card">
+        <h4>🟢 Active Fill Heatmap</h4>
+        <canvas id="fillChart"></canvas>
+      </div>
+      <div class="dash-card">
+        <h4>🔵 Collection Score Heatmap</h4>
+        <canvas id="collectChart"></canvas>
+      </div>
+    </div>
+  </div>
+
+  <script src="https://unpkg.com/leaflet/dist/leaflet.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+  <script type="module" src="js/ui.js"></script>
+</body>
+</html>
