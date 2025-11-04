@@ -30,10 +30,33 @@ app.add_middleware(
 predictor = BinPredictor()
 optimizer = BinPositionOptimizer()
 
+# Get directory paths
 BASE_DIR = Path(__file__).resolve().parent.parent
 FRONTEND_DIR = BASE_DIR / "frontend"
-STATIC_DIR = FRONTEND_DIR / "static"
-app.mount("/static", StaticFiles(directory=STATIC_DIR), name="static")
+
+# Create directories if they don't exist
+(FRONTEND_DIR / "css").mkdir(parents=True, exist_ok=True)
+(FRONTEND_DIR / "js").mkdir(parents=True, exist_ok=True)
+(FRONTEND_DIR / "static").mkdir(parents=True, exist_ok=True)
+
+# Mount static directories
+try:
+    app.mount("/css", StaticFiles(directory=str(FRONTEND_DIR / "css")), name="css")
+    print(f"✅ Mounted CSS directory: {FRONTEND_DIR / 'css'}")
+except Exception as e:
+    print(f"⚠️ Could not mount CSS directory: {e}")
+
+try:
+    app.mount("/js", StaticFiles(directory=str(FRONTEND_DIR / "js")), name="js")
+    print(f"✅ Mounted JS directory: {FRONTEND_DIR / 'js'}")
+except Exception as e:
+    print(f"⚠️ Could not mount JS directory: {e}")
+
+try:
+    app.mount("/static", StaticFiles(directory=str(FRONTEND_DIR / "static")), name="static")
+    print(f"✅ Mounted static directory: {FRONTEND_DIR / 'static'}")
+except Exception as e:
+    print(f"⚠️ Could not mount static directory: {e}")
 
 # ------------------------------
 # In-memory storage
@@ -190,6 +213,9 @@ async def startup_event():
     asyncio.create_task(simulation_loop())
     asyncio.create_task(periodic_logger())
     print("🚀 Simulation + Simulated 15-minute logger started")
+    print(f"📁 Frontend directory: {FRONTEND_DIR}")
+    print(f"📁 CSS files should be in: {FRONTEND_DIR / 'css'}")
+    print(f"📁 JS files should be in: {FRONTEND_DIR / 'js'}")
 
 # ------------------------------
 # REST API - Original endpoints
@@ -197,7 +223,13 @@ async def startup_event():
 @app.get("/")
 async def root():
     """Serve the main HTML page."""
-    return FileResponse(FRONTEND_DIR / "index.html")
+    index_file = FRONTEND_DIR / "index.html"
+    if not index_file.exists():
+        return JSONResponse(
+            {"error": f"index.html not found at {index_file}"},
+            status_code=404
+        )
+    return FileResponse(index_file)
 
 @app.get("/api/download_csv")
 async def download_csv():
@@ -339,7 +371,6 @@ async def suggest_multiple_bins(num_bins: int = 3):
             "optimization_score": suggestion.get('optimization_score', 0)
         })
         
-        # Add suggested bin to temp list for next iteration
         temp_bins.append({
             'id': f'TEMP-{i}',
             'lat': suggestion['lat'],
@@ -391,7 +422,6 @@ async def optimize_route(threshold: float = 80.0):
     depot = (12.9716, 79.1588)
     route = optimizer.optimize_collection_route(bins_to_collect, depot)
     
-    # Calculate total distance
     total_distance = 0
     current_pos = depot
     route_details = []
@@ -419,6 +449,142 @@ async def optimize_route(threshold: float = 80.0):
         "bin_count": len(route),
         "total_distance_km": round(total_distance, 2),
         "threshold": threshold
+    }
+
+# ------------------------------
+# Analytics API Endpoints
+# ------------------------------
+@app.get("/api/analytics/predictions")
+async def analytics_predictions():
+    """Get detailed predictions for analytics dashboard."""
+    predictions = []
+    
+    for bin_id, bin_data in BINS.items():
+        current_fill = bin_data.get('fill_pct', 0)
+        pop_score = bin_data.get('population_score', 0)
+        
+        if current_fill >= 100:
+            predictions.append({
+                "bin_id": bin_id,
+                "status": "full",
+                "current_fill": current_fill
+            })
+        elif pop_score == 0:
+            predictions.append({
+                "bin_id": bin_id,
+                "status": "manual",
+                "current_fill": current_fill
+            })
+        elif len(BIN_HISTORY) < 10:
+            predictions.append({
+                "bin_id": bin_id,
+                "status": "insufficient_data",
+                "current_fill": current_fill
+            })
+        else:
+            try:
+                secs_to_fill = seconds_to_fill_for_score(pop_score)
+                if math.isfinite(secs_to_fill) and secs_to_fill > 0:
+                    pct_per_hour = 3600.0 / secs_to_fill * 100
+                    remaining = 100 - current_fill
+                    hours_to_full = remaining / pct_per_hour if pct_per_hour > 0 else 0
+                    
+                    confidence = "high" if len(BIN_HISTORY) > 100 else "medium" if len(BIN_HISTORY) > 50 else "low"
+                    
+                    predictions.append({
+                        "bin_id": bin_id,
+                        "status": "active",
+                        "current_fill": round(current_fill, 2),
+                        "fill_rate_per_hour": round(pct_per_hour, 2),
+                        "time_to_full_hours": round(hours_to_full, 2),
+                        "predicted_full_time": (SIMULATED_TIME + timedelta(hours=hours_to_full)).isoformat() + "Z",
+                        "confidence": confidence
+                    })
+            except Exception as e:
+                predictions.append({
+                    "bin_id": bin_id,
+                    "status": "error",
+                    "error": str(e),
+                    "current_fill": current_fill
+                })
+    
+    return {
+        "success": True,
+        "predictions": predictions
+    }
+
+@app.post("/api/analytics/optimize")
+async def analytics_optimize(num_new_bins: int = 3):
+    """Find optimal locations for new bins."""
+    existing = list(BINS.values())
+    optimal_locations = []
+    temp_bins = existing.copy()
+    
+    for i in range(num_new_bins):
+        suggestion = optimizer.suggest_new_position(temp_bins)
+        
+        min_dist = float('inf')
+        if temp_bins:
+            for b in temp_bins:
+                dist = optimizer._haversine_distance(
+                    suggestion['lat'], suggestion['lng'],
+                    b['lat'], b['lng']
+                )
+                min_dist = min(min_dist, dist)
+        
+        optimal_locations.append({
+            "location_id": f"OPT-{i+1}",
+            "lat": round(suggestion['lat'], 6),
+            "lng": round(suggestion['lng'], 6),
+            "estimated_population_score": suggestion['expected_score'],
+            "coverage_score": min(10, int(suggestion.get('optimization_score', 0) / 10)),
+            "distance_to_nearest_bin_km": round(min_dist, 2) if min_dist != float('inf') else 0,
+            "reason": suggestion['reason']
+        })
+        
+        temp_bins.append({
+            'id': f'TEMP-{i}',
+            'lat': suggestion['lat'],
+            'lng': suggestion['lng'],
+            'population_score': suggestion['expected_score']
+        })
+    
+    return {
+        "success": True,
+        "optimal_locations": optimal_locations
+    }
+
+@app.get("/api/analytics/efficiency")
+async def analytics_efficiency():
+    """Analyze bin efficiency."""
+    efficiency_analysis = []
+    
+    for bin_id, bin_data in BINS.items():
+        collections = bin_data.get('collections', 0)
+        pop_score = bin_data.get('population_score', 0)
+        current_fill = bin_data.get('fill_pct', 0)
+        
+        if pop_score > 0:
+            secs_to_fill = seconds_to_fill_for_score(pop_score)
+            fill_rate = 3600.0 / secs_to_fill * 100 if math.isfinite(secs_to_fill) else 0
+            
+            expected_collections = max(1, collections)
+            efficiency_score = min(100, int((collections / expected_collections) * 80 + (fill_rate / 10) * 20))
+            
+            status = "optimal" if efficiency_score >= 70 else "underutilized" if efficiency_score < 50 else "normal"
+            
+            efficiency_analysis.append({
+                "bin_id": bin_id,
+                "efficiency_score": efficiency_score,
+                "collections": collections,
+                "fill_rate_per_hour": round(fill_rate, 2),
+                "current_fill": round(current_fill, 2),
+                "status": status
+            })
+    
+    return {
+        "success": True,
+        "efficiency_analysis": efficiency_analysis
     }
 
 @app.get("/api/analytics/summary")

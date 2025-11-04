@@ -5,10 +5,11 @@
   <title>VIT Smart Bin Simulator — Live Analytics</title>
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
   <link rel="stylesheet" href="https://unpkg.com/leaflet/dist/leaflet.css" />
-  <link rel="stylesheet" href="css/style.css" />
+  <link rel="stylesheet" href="/css/style.css" />
+  <link rel="stylesheet" href="/css/analytics.css" />
 </head>
 <body>
-  <h3>🗺️ VIT Smart Bin Simulator — population-score driven</h3>
+  <h3>🗺️ VIT Smart Bin Simulator — AI-Powered Analytics</h3>
 
   <div class="controls">
     <button id="startBtn" class="btn primary">Connect</button>
@@ -30,6 +31,45 @@
 
   <div id="map"></div>
 
+  <!-- AI Analytics Section -->
+  <div id="analytics-section" class="analytics-container">
+    <div class="analytics-header">
+      <h3>🤖 AI-Powered Analytics</h3>
+      <div class="analytics-controls">
+        <button id="refreshAnalytics" class="btn">🔄 Refresh</button>
+        <button id="trainModel" class="btn">🧠 Train Model</button>
+        <button id="findOptimalBtn" class="btn primary">📍 Find Optimal Locations</button>
+        <button id="toggleAnalytics" class="btn">👁️ Hide</button>
+      </div>
+    </div>
+
+    <div id="analyticsContent">
+      <!-- Predictions Panel -->
+      <div class="analytics-panel">
+        <h4>⏱️ Fill Time Predictions</h4>
+        <div id="predictionsContainer" class="predictions-grid">
+          <p class="loading">Click "Connect" to start receiving predictions...</p>
+        </div>
+      </div>
+
+      <!-- Optimal Locations Panel -->
+      <div class="analytics-panel">
+        <h4>📍 Suggested Bin Locations</h4>
+        <div id="optimalContainer">
+          <p class="info">Click "Find Optimal Locations" to generate suggestions</p>
+        </div>
+      </div>
+
+      <!-- Efficiency Panel -->
+      <div class="analytics-panel">
+        <h4>📊 Bin Efficiency Analysis</h4>
+        <div id="efficiencyContainer">
+          <p class="info">Add bins and collect data to see efficiency metrics...</p>
+        </div>
+      </div>
+    </div>
+  </div>
+
   <!-- Dashboard Section -->
   <div id="dashboard">
     <h3>📊 Live Analytics Dashboard</h3>
@@ -48,6 +88,6 @@
 
   <script src="https://unpkg.com/leaflet/dist/leaflet.js"></script>
   <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
-  <script type="module" src="js/ui.js"></script>
+  <script type="module" src="/js/ui.js"></script>
 </body>
 </html>

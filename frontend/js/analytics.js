@@ -1,90 +1,49 @@
-// analytics.js - Add this to your frontend/static/js folder
+// analytics.js - AI-Powered Analytics Dashboard
 
-class AnalyticsDashboard {
+export class AnalyticsDashboard {
     constructor() {
       this.predictions = [];
       this.optimalLocations = [];
       this.efficiency = [];
       this.updateInterval = null;
+      this.isConnected = false;
     }
   
     init() {
-      this.createDashboardUI();
-      this.startAutoUpdate();
-    }
-  
-    createDashboardUI() {
-      // Check if analytics section already exists
-      if (document.getElementById('analytics-section')) return;
-  
-      const analyticsHTML = `
-        <div id="analytics-section" class="analytics-container">
-          <div class="analytics-header">
-            <h3>🤖 AI-Powered Analytics</h3>
-            <div class="analytics-controls">
-              <button id="refreshAnalytics" class="btn">🔄 Refresh</button>
-              <button id="findOptimalBtn" class="btn primary">📍 Find Optimal Locations</button>
-              <button id="toggleAnalytics" class="btn">👁️ Hide</button>
-            </div>
-          </div>
-  
-          <div id="analyticsContent">
-            <!-- Predictions Panel -->
-            <div class="analytics-panel">
-              <h4>⏱️ Fill Time Predictions</h4>
-              <div id="predictionsContainer" class="predictions-grid">
-                <p class="loading">Loading predictions...</p>
-              </div>
-            </div>
-  
-            <!-- Optimal Locations Panel -->
-            <div class="analytics-panel">
-              <h4>📍 Suggested Bin Locations</h4>
-              <div id="optimalContainer">
-                <p class="info">Click "Find Optimal Locations" to generate suggestions</p>
-              </div>
-            </div>
-  
-            <!-- Efficiency Panel -->
-            <div class="analytics-panel">
-              <h4>📊 Bin Efficiency Analysis</h4>
-              <div id="efficiencyContainer">
-                <p class="loading">Analyzing...</p>
-              </div>
-            </div>
-          </div>
-        </div>
-      `;
-  
-      // Insert before dashboard or after map
-      const mapEl = document.getElementById('map');
-      if (mapEl) {
-        mapEl.insertAdjacentHTML('afterend', analyticsHTML);
-      }
-  
       this.attachEventListeners();
+      console.log('📊 Analytics dashboard initialized');
     }
   
     attachEventListeners() {
-      document.getElementById('refreshAnalytics')?.addEventListener('click', () => {
-        this.fetchAllAnalytics();
-      });
+      const refreshBtn = document.getElementById('refreshAnalytics');
+      const trainBtn = document.getElementById('trainModel');
+      const findOptimalBtn = document.getElementById('findOptimalBtn');
+      const toggleBtn = document.getElementById('toggleAnalytics');
   
-      document.getElementById('findOptimalBtn')?.addEventListener('click', () => {
-        this.findOptimalLocations();
-      });
+      if (refreshBtn) {
+        refreshBtn.addEventListener('click', () => this.fetchAllAnalytics());
+      }
   
-      document.getElementById('toggleAnalytics')?.addEventListener('click', (e) => {
-        const content = document.getElementById('analyticsContent');
-        const btn = e.target;
-        if (content.style.display === 'none') {
-          content.style.display = 'block';
-          btn.textContent = '👁️ Hide';
-        } else {
-          content.style.display = 'none';
-          btn.textContent = '👁️ Show';
-        }
-      });
+      if (trainBtn) {
+        trainBtn.addEventListener('click', () => this.trainModel());
+      }
+  
+      if (findOptimalBtn) {
+        findOptimalBtn.addEventListener('click', () => this.findOptimalLocations());
+      }
+  
+      if (toggleBtn) {
+        toggleBtn.addEventListener('click', (e) => {
+          const content = document.getElementById('analyticsContent');
+          if (content.style.display === 'none') {
+            content.style.display = 'block';
+            e.target.textContent = '👁️ Hide';
+          } else {
+            content.style.display = 'none';
+            e.target.textContent = '👁️ Show';
+          }
+        });
+      }
     }
   
     async fetchAllAnalytics() {
@@ -106,6 +65,23 @@ class AnalyticsDashboard {
       } catch (error) {
         console.error('Failed to fetch predictions:', error);
         this.showError('predictionsContainer', 'Failed to load predictions');
+      }
+    }
+  
+    async trainModel() {
+      try {
+        const response = await fetch('/api/train_model');
+        const data = await response.json();
+        
+        if (data.success) {
+          alert(`✅ Model trained successfully!\n${data.training_samples} samples used.`);
+          await this.fetchAllAnalytics();
+        } else {
+          alert(`⚠️ ${data.message || 'Failed to train model'}`);
+        }
+      } catch (error) {
+        console.error('Failed to train model:', error);
+        alert('❌ Failed to train model');
       }
     }
   
@@ -150,7 +126,7 @@ class AnalyticsDashboard {
       if (!container) return;
   
       if (this.predictions.length === 0) {
-        container.innerHTML = '<p class="info">No predictions available yet. Bins need more data.</p>';
+        container.innerHTML = '<p class="info">No bins available. Add bins to see predictions.</p>';
         return;
       }
   
@@ -162,7 +138,23 @@ class AnalyticsDashboard {
                 <strong>${pred.bin_id}</strong>
                 <span class="status-badge full">FULL</span>
               </div>
-              <p>Current: ${pred.current_fill.toFixed(1)}%</p>
+              <div class="pred-body">
+                <p>Current: ${pred.current_fill.toFixed(1)}%</p>
+                <p style="color: #f44336;">⚠️ Needs collection</p>
+              </div>
+            </div>
+          `;
+        } else if (pred.status === 'manual') {
+          return `
+            <div class="prediction-card">
+              <div class="pred-header">
+                <strong>${pred.bin_id}</strong>
+                <span class="status-badge" style="background: #9e9e9e;">MANUAL</span>
+              </div>
+              <div class="pred-body">
+                <p>Current: ${pred.current_fill.toFixed(1)}%</p>
+                <p style="font-size: 12px; color: #777;">Manual control (score = 0)</p>
+              </div>
             </div>
           `;
         } else if (pred.status === 'insufficient_data') {
@@ -170,12 +162,15 @@ class AnalyticsDashboard {
             <div class="prediction-card pending">
               <div class="pred-header">
                 <strong>${pred.bin_id}</strong>
-                <span class="status-badge pending">PENDING</span>
+                <span class="status-badge pending">LEARNING</span>
               </div>
-              <p>Collecting data... (${pred.current_fill.toFixed(1)}%)</p>
+              <div class="pred-body">
+                <p>Current: ${pred.current_fill.toFixed(1)}%</p>
+                <p style="font-size: 12px; color: #777;">Collecting data for predictions...</p>
+              </div>
             </div>
           `;
-        } else if (pred.time_to_full_hours !== undefined) {
+        } else if (pred.status === 'active' && pred.time_to_full_hours !== undefined) {
           const hours = pred.time_to_full_hours;
           const timeStr = hours < 1 
             ? `${Math.round(hours * 60)} min` 
@@ -183,8 +178,12 @@ class AnalyticsDashboard {
             ? `${hours.toFixed(1)} hrs`
             : `${(hours / 24).toFixed(1)} days`;
           
-          const confidenceColor = pred.confidence === 'high' ? 'green' : 
-                                  pred.confidence === 'medium' ? 'orange' : 'red';
+          const confidenceColors = {
+            'high': '#4CAF50',
+            'medium': '#ff9800',
+            'low': '#f44336'
+          };
+          const confidenceColor = confidenceColors[pred.confidence] || '#9e9e9e';
           
           return `
             <div class="prediction-card active">
@@ -196,8 +195,8 @@ class AnalyticsDashboard {
               </div>
               <div class="pred-body">
                 <p class="pred-time">⏱️ Time to full: <strong>${timeStr}</strong></p>
-                <p class="pred-fill">📊 Fill rate: ${pred.fill_rate_per_hour.toFixed(2)}%/hr</p>
-                <p class="pred-current">Current: ${pred.current_fill.toFixed(1)}%</p>
+                <p>📈 Fill rate: ${pred.fill_rate_per_hour.toFixed(2)}%/hr</p>
+                <p>📊 Current: ${pred.current_fill.toFixed(1)}%</p>
                 ${pred.predicted_full_time ? 
                   `<p class="pred-date">📅 ${new Date(pred.predicted_full_time).toLocaleString()}</p>` 
                   : ''}
@@ -208,7 +207,7 @@ class AnalyticsDashboard {
         return '';
       }).join('');
   
-      container.innerHTML = html;
+      container.innerHTML = html || '<p class="info">No predictions available</p>';
     }
   
     renderOptimalLocations() {
@@ -229,11 +228,11 @@ class AnalyticsDashboard {
                 <span class="score-badge">Score: ${loc.coverage_score}/10</span>
               </div>
               <div class="optimal-body">
-                <p>📍 Lat: ${loc.lat}, Lng: ${loc.lng}</p>
+                <p>📍 Lat: ${loc.lat.toFixed(6)}, Lng: ${loc.lng.toFixed(6)}</p>
                 <p>👥 Est. Population: ${loc.estimated_population_score}/10</p>
-                <p>📏 Nearest bin: ${loc.distance_to_nearest_bin_km} km</p>
+                <p>📏 Nearest bin: ${loc.distance_to_nearest_bin_km.toFixed(2)} km</p>
                 <p class="reason">${loc.reason}</p>
-                <button class="btn btn-sm" onclick="analytics.addBinAtLocation(${loc.lat}, ${loc.lng}, ${loc.estimated_population_score})">
+                <button class="btn btn-sm" onclick="window.addBinAtLocation(${loc.lat}, ${loc.lng}, ${loc.estimated_population_score})">
                   ➕ Add Bin Here
                 </button>
               </div>
@@ -269,6 +268,7 @@ class AnalyticsDashboard {
                 </div>
                 <p>🔄 Collections: ${eff.collections}</p>
                 <p>📈 Fill rate: ${eff.fill_rate_per_hour.toFixed(2)}%/hr</p>
+                <p>📊 Current: ${eff.current_fill.toFixed(1)}%</p>
                 <div class="progress-bar">
                   <div class="progress-fill" style="width: ${eff.efficiency_score}%"></div>
                 </div>
@@ -282,13 +282,17 @@ class AnalyticsDashboard {
     }
   
     displayOptimalOnMap() {
-      // This function should interact with your Leaflet map
-      // Assuming you have a global map object
-      if (typeof window.map === 'undefined') return;
+      // Access global map object
+      if (typeof window.mapInstance === 'undefined') {
+        console.warn('Map not available');
+        return;
+      }
+  
+      const map = window.mapInstance;
   
       // Clear previous optimal markers
       if (window.optimalMarkers) {
-        window.optimalMarkers.forEach(m => window.map.removeLayer(m));
+        window.optimalMarkers.forEach(m => map.removeLayer(m));
       }
       window.optimalMarkers = [];
   
@@ -303,37 +307,23 @@ class AnalyticsDashboard {
             </div>`,
             iconSize: [40, 40]
           })
-        }).addTo(window.map);
+        }).addTo(map);
   
         marker.bindPopup(`
-          <strong>${loc.location_id}</strong><br>
-          Coverage Score: ${loc.coverage_score}/10<br>
-          Est. Population: ${loc.estimated_population_score}/10<br>
-          <button onclick="analytics.addBinAtLocation(${loc.lat}, ${loc.lng}, ${loc.estimated_population_score})">
-            Add Bin
-          </button>
+          <div style="font-size: 14px; min-width: 200px;">
+            <strong>${loc.location_id}</strong><br>
+            Coverage Score: ${loc.coverage_score}/10<br>
+            Est. Population: ${loc.estimated_population_score}/10<br>
+            <button class="btn" style="margin-top: 8px;" onclick="window.addBinAtLocation(${loc.lat}, ${loc.lng}, ${loc.estimated_population_score})">
+              ➕ Add Bin
+            </button>
+          </div>
         `);
   
         window.optimalMarkers.push(marker);
       });
-    }
   
-    addBinAtLocation(lat, lng, popScore) {
-      // This should trigger your existing "add bin" functionality
-      // Emit via WebSocket or call your existing add bin function
-      if (window.ws && window.ws.readyState === WebSocket.OPEN) {
-        window.ws.send(JSON.stringify({
-          type: 'add_bin',
-          bin: {
-            lat: lat,
-            lng: lng,
-            population_score: popScore,
-            fill_pct: 0,
-            collections: 0
-          }
-        }));
-        alert(`Adding bin at ${lat.toFixed(4)}, ${lng.toFixed(4)}`);
-      }
+      console.log(`📍 Added ${this.optimalLocations.length} optimal location markers`);
     }
   
     showError(containerId, message) {
@@ -346,26 +336,32 @@ class AnalyticsDashboard {
     startAutoUpdate() {
       // Update predictions every 30 seconds
       this.updateInterval = setInterval(() => {
-        this.fetchAllAnalytics();
+        if (this.isConnected) {
+          this.fetchAllAnalytics();
+        }
       }, 30000);
+      console.log('🔄 Auto-update started (30s interval)');
     }
   
     stopAutoUpdate() {
       if (this.updateInterval) {
         clearInterval(this.updateInterval);
+        this.updateInterval = null;
+        console.log('⏸️ Auto-update stopped');
       }
+    }
+  
+    onConnect() {
+      this.isConnected = true;
+      this.fetchAllAnalytics();
+      this.startAutoUpdate();
+    }
+  
+    onDisconnect() {
+      this.isConnected = false;
+      this.stopAutoUpdate();
     }
   }
   
-  // Initialize analytics dashboard
-  const analytics = new AnalyticsDashboard();
-  
-  // Auto-init when page loads
-  if (document.readyState === 'loading') {
-    document.addEventListener('DOMContentLoaded', () => analytics.init());
-  } else {
-    analytics.init();
-  }
-  
-  // Export for use in other modules
-  export default analytics;
+  // Create global instance
+  export const analyticsInstance = new AnalyticsDashboard();
