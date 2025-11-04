@@ -5,13 +5,13 @@ import uuid
 from datetime import datetime, timedelta
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import JSONResponse, StreamingResponse
+from fastapi.responses import JSONResponse, StreamingResponse, FileResponse
 from fastapi.staticfiles import StaticFiles
 from typing import List, Dict
 from pathlib import Path
 from io import StringIO
 import csv
-from bin_predictor import BinPredictor, BinPositionOptimizer, create_prediction_api_endpoints
+from bin_predictor import BinPredictor, BinPositionOptimizer
 
 app = FastAPI()
 
@@ -26,6 +26,7 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
+# Initialize ML components
 predictor = BinPredictor()
 optimizer = BinPositionOptimizer()
 
@@ -91,8 +92,8 @@ manager = ConnectionManager()
 # ------------------------------
 # Simulation parameters
 # ------------------------------
-TICK_SECONDS = 1.0          # real seconds between updates
-SIM_SPEED = 1.0             # simulation speed multiplier
+TICK_SECONDS = 1.0
+SIM_SPEED = 1.0
 FASTEST_FILL_SECONDS = 6 * 3600
 SLOWEST_FILL_SECONDS = 48 * 3600
 SIMULATED_TIME = datetime.utcnow()
@@ -144,7 +145,6 @@ async def simulation_loop():
 
         SIMULATED_TIME += timedelta(seconds=effective_seconds)
 
-        # Broadcast simulation time + bin updates
         for u in updates:
             await manager.broadcast(u)
 
@@ -157,10 +157,9 @@ async def simulation_loop():
         await asyncio.sleep(TICK_SECONDS)
 
 # ------------------------------
-# ⏱️ Periodic logger (every 15 simulated minutes)
+# Periodic logger
 # ------------------------------
 async def periodic_logger():
-    """Every 15 simulated minutes, snapshot all bins into BIN_HISTORY."""
     global SIMULATED_TIME
     last_snapshot_time = SIMULATED_TIME
     while True:
@@ -193,8 +192,13 @@ async def startup_event():
     print("🚀 Simulation + Simulated 15-minute logger started")
 
 # ------------------------------
-# REST API
+# REST API - Original endpoints
 # ------------------------------
+@app.get("/")
+async def root():
+    """Serve the main HTML page."""
+    return FileResponse(FRONTEND_DIR / "index.html")
+
 @app.get("/api/download_csv")
 async def download_csv():
     """Export complete bin history as a time-series CSV."""
@@ -211,7 +215,246 @@ async def download_csv():
     return StreamingResponse(output, media_type="text/csv",
                              headers={"Content-Disposition": f"attachment; filename={filename}"})
 
-create_prediction_api_endpoints(app, predictor, optimizer, BINS, BIN_HISTORY)
+# ------------------------------
+# ML Prediction Endpoints
+# ------------------------------
+@app.get("/api/predict_fill_time/{bin_id}")
+async def predict_fill_time(bin_id: str):
+    """Predict time until bin is full."""
+    if bin_id not in BINS:
+        return JSONResponse({"error": "Bin not found"}, status_code=404)
+    
+    bin_data = BINS[bin_id]
+    prediction = predictor.predict_fill_time(bin_data, BIN_HISTORY)
+    
+    current_fill = bin_data.get('fill_pct', 0)
+    remaining_pct = max(0, 100 - current_fill)
+    time_to_full = prediction['hours_to_fill'] * (remaining_pct / 100) if remaining_pct > 0 else 0
+    
+    return {
+        "success": True,
+        "bin_id": bin_id,
+        "current_fill_pct": round(current_fill, 2),
+        "hours_to_full": round(time_to_full, 2),
+        "estimated_full_time": (SIMULATED_TIME + timedelta(hours=time_to_full)).isoformat() + "Z",
+        "confidence": prediction['confidence'],
+        "method": prediction['method']
+    }
+
+@app.get("/api/predict_all_bins")
+async def predict_all_bins():
+    """Get predictions for all bins."""
+    predictions = []
+    
+    for bin_id, bin_data in BINS.items():
+        current_fill = bin_data.get('fill_pct', 0)
+        
+        if current_fill >= 100:
+            predictions.append({
+                "bin_id": bin_id,
+                "status": "full",
+                "current_fill_pct": 100.0
+            })
+        elif current_fill == 0:
+            predictions.append({
+                "bin_id": bin_id,
+                "status": "empty",
+                "current_fill_pct": 0.0
+            })
+        else:
+            try:
+                prediction = predictor.predict_fill_time(bin_data, BIN_HISTORY)
+                remaining_pct = 100 - current_fill
+                time_to_full = prediction['hours_to_fill'] * (remaining_pct / 100)
+                
+                predictions.append({
+                    "bin_id": bin_id,
+                    "rfid": bin_data.get('rfid'),
+                    "current_fill_pct": round(current_fill, 2),
+                    "hours_to_full": round(time_to_full, 2),
+                    "estimated_full_time": (SIMULATED_TIME + timedelta(hours=time_to_full)).isoformat() + "Z",
+                    "confidence": prediction['confidence'],
+                    "method": prediction['method'],
+                    "status": "filling"
+                })
+            except Exception as e:
+                predictions.append({
+                    "bin_id": bin_id,
+                    "status": "error",
+                    "error": str(e),
+                    "current_fill_pct": round(current_fill, 2)
+                })
+    
+    return {
+        "success": True,
+        "predictions": predictions,
+        "timestamp": SIMULATED_TIME.isoformat() + "Z"
+    }
+
+@app.get("/api/suggest_new_bin")
+async def suggest_new_bin():
+    """Suggest optimal position for new bin."""
+    existing = list(BINS.values())
+    
+    if not existing:
+        return {
+            "success": True,
+            "suggestion": {
+                "lat": 12.9716,
+                "lng": 79.1588,
+                "expected_population_score": 5,
+                "reason": "first_bin_center"
+            }
+        }
+    
+    suggestion = optimizer.suggest_new_position(existing)
+    
+    return {
+        "success": True,
+        "suggestion": {
+            "lat": round(suggestion['lat'], 6),
+            "lng": round(suggestion['lng'], 6),
+            "expected_population_score": suggestion['expected_score'],
+            "reason": suggestion['reason'],
+            "optimization_score": suggestion.get('optimization_score', 0)
+        }
+    }
+
+@app.post("/api/suggest_multiple_bins")
+async def suggest_multiple_bins(num_bins: int = 3):
+    """Suggest multiple optimal bin positions."""
+    existing = list(BINS.values())
+    suggestions = []
+    
+    temp_bins = existing.copy()
+    
+    for i in range(num_bins):
+        suggestion = optimizer.suggest_new_position(temp_bins)
+        suggestions.append({
+            "location_id": f"SUGGESTED-{i+1}",
+            "lat": round(suggestion['lat'], 6),
+            "lng": round(suggestion['lng'], 6),
+            "expected_population_score": suggestion['expected_score'],
+            "reason": suggestion['reason'],
+            "optimization_score": suggestion.get('optimization_score', 0)
+        })
+        
+        # Add suggested bin to temp list for next iteration
+        temp_bins.append({
+            'id': f'TEMP-{i}',
+            'lat': suggestion['lat'],
+            'lng': suggestion['lng'],
+            'population_score': suggestion['expected_score']
+        })
+    
+    return {
+        "success": True,
+        "suggestions": suggestions,
+        "count": len(suggestions)
+    }
+
+@app.get("/api/train_model")
+async def train_model():
+    """Train prediction model on current historical data."""
+    try:
+        success = predictor.train(BIN_HISTORY)
+        return {
+            "success": success,
+            "training_samples": len(BIN_HISTORY),
+            "model_status": "trained" if success else "insufficient_data",
+            "message": "Model trained successfully" if success else "Need more data (minimum 50 records)"
+        }
+    except Exception as e:
+        return {
+            "success": False,
+            "error": str(e),
+            "training_samples": len(BIN_HISTORY)
+        }
+
+@app.get("/api/optimize_route")
+async def optimize_route(threshold: float = 80.0):
+    """Get optimized collection route for bins above threshold."""
+    bins_to_collect = [
+        b for b in BINS.values() 
+        if b.get('fill_pct', 0) >= threshold
+    ]
+    
+    if not bins_to_collect:
+        return {
+            "success": True,
+            "route": [],
+            "bin_count": 0,
+            "threshold": threshold,
+            "message": "No bins above threshold"
+        }
+    
+    depot = (12.9716, 79.1588)
+    route = optimizer.optimize_collection_route(bins_to_collect, depot)
+    
+    # Calculate total distance
+    total_distance = 0
+    current_pos = depot
+    route_details = []
+    
+    for bin_id in route:
+        bin_data = BINS[bin_id]
+        dist = optimizer._haversine_distance(
+            current_pos[0], current_pos[1],
+            bin_data['lat'], bin_data['lng']
+        )
+        total_distance += dist
+        route_details.append({
+            "bin_id": bin_id,
+            "lat": bin_data['lat'],
+            "lng": bin_data['lng'],
+            "fill_pct": bin_data['fill_pct'],
+            "distance_from_previous": round(dist, 2)
+        })
+        current_pos = (bin_data['lat'], bin_data['lng'])
+    
+    return {
+        "success": True,
+        "route": route,
+        "route_details": route_details,
+        "bin_count": len(route),
+        "total_distance_km": round(total_distance, 2),
+        "threshold": threshold
+    }
+
+@app.get("/api/analytics/summary")
+async def analytics_summary():
+    """Get comprehensive analytics summary."""
+    bins_list = list(BINS.values())
+    
+    if not bins_list:
+        return {
+            "success": False,
+            "error": "No bins available"
+        }
+    
+    total_bins = len(bins_list)
+    active_bins = len([b for b in bins_list if 0 < b.get('fill_pct', 0) < 100])
+    full_bins = len([b for b in bins_list if b.get('fill_pct', 0) >= 100])
+    empty_bins = len([b for b in bins_list if b.get('fill_pct', 0) == 0])
+    
+    avg_fill = sum(b.get('fill_pct', 0) for b in bins_list) / total_bins if total_bins > 0 else 0
+    total_collections = sum(b.get('collections', 0) for b in bins_list)
+    
+    return {
+        "success": True,
+        "summary": {
+            "total_bins": total_bins,
+            "active_bins": active_bins,
+            "full_bins": full_bins,
+            "empty_bins": empty_bins,
+            "average_fill_percentage": round(avg_fill, 2),
+            "total_collections": total_collections,
+            "model_trained": predictor.is_trained,
+            "historical_records": len(BIN_HISTORY)
+        },
+        "timestamp": SIMULATED_TIME.isoformat() + "Z"
+    }
+
 # ------------------------------
 # WebSocket handler
 # ------------------------------
@@ -306,6 +549,7 @@ async def websocket_endpoint(websocket: WebSocket):
                     b["collections"] = 0
                     b["paused"] = False
                     log_bin_state(b, event="reset")
+                await manager.broadcast({"type": "reset_done"})
                 print("♻️ Simulation reset complete")
 
     except WebSocketDisconnect:
